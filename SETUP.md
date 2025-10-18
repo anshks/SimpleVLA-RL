@@ -44,7 +44,7 @@ pip install -e .
 # If you encounter issues, try `pip cache remove flash_attn` first
 pip install packaging ninja
 ninja --version; echo $?  # Should return exit code "0"
-pip3 install flash-attn --no-build-isolation
+pip3 install "flash-attn==2.7.4.post1" --no-build-isolation
 
 cd ..
 
