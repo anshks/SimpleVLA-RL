@@ -2,6 +2,7 @@ data:
   tokenizer: null
   task_suite_name: libero_10
   num_trials_per_task: 50
+  data_dir: null  # Required for worldgym dataset
   filter_warmup: False
   prompt_key: prompt
   system_prompt: null
@@ -98,7 +99,8 @@ actor_rollout_ref:
     pretrained_checkpoint: None
     center_crop: True
     max_prompt_length: 512
-    num_images_in_input: 1  
+    num_images_in_input: 1
+    world_model_checkpoint: null  # Required for worldgym  
     name: vllm
     temperature: 1.0
     top_k: -1 # 0 for hf rollout, -1 for vllm rollout

@@ -396,23 +396,44 @@ class DataProto:
         Returns:
             List[DataProto]: a list of DataProto after splitting
         """
-        if self.batch is not None:
-            batch_lst = self.batch.chunk(chunks=chunks, dim=0)
-        else:
-            batch_lst = [None for _ in range(chunks)]
+        target_chunks = max(int(chunks), 1)
+        num_items = None
+        if self.batch is not None and len(self.batch.batch_size) > 0:
+            num_items = int(self.batch.batch_size[0])
+        elif len(self.non_tensor_batch) > 0:
+            first_val = next(iter(self.non_tensor_batch.values()))
+            num_items = len(first_val)
 
-        non_tensor_batch_lst = [{} for _ in range(chunks)]
+        if num_items is not None and num_items > 0:
+            target_chunks = min(target_chunks, num_items)
+
+        if self.batch is not None:
+            batch_lst = self.batch.chunk(chunks=target_chunks, dim=0)
+            batch_sizes = [int(b.batch_size[0]) for b in batch_lst]
+        else:
+            batch_lst = [None for _ in range(target_chunks)]
+            # Distribute non-tensor items evenly
+            if num_items is not None and num_items >= 0:
+                base, rem = divmod(num_items, target_chunks)
+                batch_sizes = [base + (1 if i < rem else 0) for i in range(target_chunks)]
+            else:
+                batch_sizes = [0 for _ in range(target_chunks)]
+
+        non_tensor_batch_lst = [{} for _ in range(target_chunks)]
         for key, val in self.non_tensor_batch.items():
             assert isinstance(val, np.ndarray)
-            non_tensor_lst = np.array_split(val, chunks)
-            assert len(non_tensor_lst) == chunks
-            for i in range(chunks):
-                non_tensor_batch_lst[i][key] = non_tensor_lst[i]
+            assert len(val) == sum(batch_sizes) or (len(val) == 0 and sum(batch_sizes) == 0), \
+                f"Non-tensor key {key} length {len(val)} mismatch with total batch {sum(batch_sizes)}"
+            start = 0
+            for i, size in enumerate(batch_sizes):
+                non_tensor_batch_lst[i][key] = val[start:start + size]
+                start += size
+            assert start == len(val)
 
         output = []
-        assert len(batch_lst) == chunks, (f"len(batch_lst) ({len(batch_lst)}) != chunks ({chunks})")
-        assert len(non_tensor_batch_lst) == chunks, (f"len(non_tensor_batch_lst) ({len(non_tensor_batch_lst)}) != chunks ({chunks})")
-        for i in range(chunks):
+        assert len(batch_lst) == target_chunks, (f"len(batch_lst) ({len(batch_lst)}) != chunks ({target_chunks})")
+        assert len(non_tensor_batch_lst) == target_chunks, (f"len(non_tensor_batch_lst) ({len(non_tensor_batch_lst)}) != chunks ({target_chunks})")
+        for i in range(target_chunks):
             output.append(
                 DataProto(batch=batch_lst[i], non_tensor_batch=non_tensor_batch_lst[i], meta_info=self.meta_info))
 
