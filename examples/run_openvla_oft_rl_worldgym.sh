@@ -1,7 +1,6 @@
 set -x
 
 export NCCL_DEBUG=WARN
-export WANDB_API_KEY='14094be1295a320463cde7a6970604869dac3985'
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=true
 export CUDA_LAUNCH_BLOCKING=1
