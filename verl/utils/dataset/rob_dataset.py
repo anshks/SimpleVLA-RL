@@ -221,8 +221,14 @@ class WORLDGYM_Dataset(Dataset):
                         # Use first num_trials_per_task trials
                         trials_to_use = trials_for_instruction[:self.num_trials_per_task]
                 elif self.train_val == "valid":
-                    # Use all available trials for validation
-                    trials_to_use = trials_for_instruction
+                    # Repeat trials if needed to meet minimum batch size requirement
+                    if self.num_trials_per_task > len(trials_for_instruction):
+                        # Repeat trials to reach num_trials_per_task (e.g., to match num_gpus)
+                        repeat_count = (self.num_trials_per_task + len(trials_for_instruction) - 1) // len(trials_for_instruction)
+                        trials_to_use = (trials_for_instruction * repeat_count)[:self.num_trials_per_task]
+                    else:
+                        # Use all available trials for validation
+                        trials_to_use = trials_for_instruction
                 else:
                     raise ValueError(f"Invalid train_val: {self.train_val}")
 

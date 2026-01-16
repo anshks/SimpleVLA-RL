@@ -295,11 +295,11 @@ class RayTrainer(object):
         from verl.utils.dataset.rob_dataset import LIBERO_Dataset, WORLDGYM_Dataset, Robotwin_Dataset, collate_fn, TaskBatchSampler
         if "worldgym" in self.config.data.task_suite_name:
             self.train_dataset = WORLDGYM_Dataset(self.config.data.task_suite_name,
-                                                data_dir=self.config.data.data_dir,
+                                                data_dir=self.config.data.data_dir + "/train",
                                                 num_trials_per_task=self.config.data.num_trials_per_task,
                                                 train_val ="train")
             self.val_dataset = WORLDGYM_Dataset(self.config.data.task_suite_name,
-                                            data_dir=self.config.data.data_dir,
+                                            data_dir=self.config.data.data_dir + "/test",
                                             num_trials_per_task=self.config.data.num_trials_per_task,
                                             train_val ="valid")
         elif "libero" in self.config.data.task_suite_name:

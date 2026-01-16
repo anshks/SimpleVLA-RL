@@ -6,18 +6,22 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=true
 export CUDA_LAUNCH_BLOCKING=1
 export TORCH_USE_CUDA_DSA=1
-export ROBOT_PLATFORM=LIBERO # Use LIBERO: ROBOT_PLATFORM=LIBERO  Use Robotwin ROBOT_PLATFORM=ALOHA
+export ROBOT_PLATFORM=WORLDGYM
+
 PROJECT_NAME='SimpleVLA-RL'
-EXPERIMENT_NAME='libero_oft_rl_sft'
-# For openvla-oft Libero-Long traj1 SFT or traj all SFT models can be find in https://huggingface.co/collections/Haozhan72/simplevla-rl-6833311430cd9df52aeb1f86
-SFT_MODEL_NAME="openvla-7b-oft-finetuned-libero-10"
+EXPERIMENT_NAME='openvla_worldgym_libero_oft'
+# Using OpenVLA-OFT checkpoint trained on Libero
+SFT_MODEL_NAME="Openvla-oft-SFT-libero10-trajall"
 SFT_MODEL_PATH="/scratch/as20482/SimpleVLA-RL/checkpoints/$SFT_MODEL_NAME"
 CKPT_PATH="/scratch/as20482/SimpleVLA-RL/checkpoints"
-# DATASET_NAME can be libero_10 (libero_Long), libero_90, libero_spatial, libero_object, libero_goal
-DATASET_NAME="libero_10"
+
+# World model configuration
+WORLD_MODEL_CHECKPOINT="/scratch/as20482/world-model-eval/mixed_openx_9robots_20frames_0p1actiondropout_580ksteps.pt"
+DATA_DIR="/scratch/as20482/datasets/openvla_evaluation"
+
+DATASET_NAME="worldgym_bridge"
 VLA_NAME="openvla-oft"
 NUM_GPUS=8
-# If you want to use 2*8 GPU to RL. Set NUM_NODES=2
 NUM_NODES=1
 ALIGN_PATH="/scratch/as20482/SimpleVLA-RL/align.json"
 
@@ -33,14 +37,15 @@ bash examples/overwrite_vla_ckpt_utils.sh $SFT_MODEL_PATH
 
 HYDRA_FULL_ERROR=1 python -u -m verl.trainer.main_ppo \
     data.task_suite_name=$DATASET_NAME \
+    data.data_dir=$DATA_DIR \
     data.num_trials_per_task=50 \
     data.n_samples=8 \
     data.filter_accuracy=True \
-    data.accuracy_lower_bound=0.1 \
-    data.accuracy_upper_bound=0.9 \
+    data.accuracy_lower_bound=0.0 \
+    data.accuracy_upper_bound=1.0 \
     data.oversample_factor=1 \
-    data.train_batch_size=64 \
-    data.val_batch_size=496 \
+    data.train_batch_size=50 \
+    data.val_batch_size=50 \
     data.max_prompt_length=256 \
     data.max_response_length=128 \
     actor_rollout_ref.model.path=$SFT_MODEL_PATH \
@@ -49,39 +54,39 @@ HYDRA_FULL_ERROR=1 python -u -m verl.trainer.main_ppo \
     actor_rollout_ref.model.action_chunks_len=8 \
     actor_rollout_ref.actor.optim.lr=5e-6 \
     actor_rollout_ref.actor.optim.warmup_style=constant \
-    actor_rollout_ref.actor.ppo_mini_batch_size=128 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=200 \
     actor_rollout_ref.actor.ppo_micro_batch_size=$NUM_GPUS \
     actor_rollout_ref.actor.use_dynamic_bsz=False \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
-    actor_rollout_ref.actor.fsdp_config.grad_offload=True \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+    actor_rollout_ref.actor.fsdp_config.grad_offload=False \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.actor.grad_clip=1 \
     actor_rollout_ref.actor.clip_ratio_high=0.28 \
     actor_rollout_ref.actor.clip_ratio_low=0.2 \
     actor_rollout_ref.actor.num_images_in_input=1 \
-    actor_rollout_ref.actor.traj_mini_batch_size=16 \
+    actor_rollout_ref.actor.traj_mini_batch_size=5 \
     actor_rollout_ref.model.enable_gradient_checkpointing=False \
     actor_rollout_ref.model.use_remove_padding=False \
     actor_rollout_ref.actor.entropy_coeff=0. \
     actor_rollout_ref.rollout.num_images_in_input=1 \
     actor_rollout_ref.rollout.use_proprio=False \
-    actor_rollout_ref.rollout.val_micro_batch_size=8 \
+    actor_rollout_ref.rollout.val_micro_batch_size=50 \
     actor_rollout_ref.rollout.temperature=1.6 \
     actor_rollout_ref.rollout.experiment_name=$EXPERIMENT_NAME \
     actor_rollout_ref.rollout.micro_batch_size=1 \
-    actor_rollout_ref.rollout.unnorm_key=$DATASET_NAME \
+    actor_rollout_ref.rollout.unnorm_key=bridge_orig \
     actor_rollout_ref.rollout.model_family=openvla \
     actor_rollout_ref.rollout.task_suite_name=$DATASET_NAME \
-    actor_rollout_ref.rollout.num_steps_wait=10 \
     actor_rollout_ref.rollout.pretrained_checkpoint=$SFT_MODEL_PATH \
     actor_rollout_ref.rollout.center_crop=True \
     actor_rollout_ref.rollout.max_prompt_length=512 \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size=32 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size=400 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=hf \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.9 \
-    actor_rollout_ref.ref.log_prob_micro_batch_size=32 \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.95 \
+    actor_rollout_ref.rollout.world_model_checkpoint=$WORLD_MODEL_CHECKPOINT \
+    actor_rollout_ref.ref.log_prob_micro_batch_size=400 \
+    actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.kl_ctrl.kl_coef=0.00 \
     trainer.logger=['console','wandb'] \
     trainer.project_name=$PROJECT_NAME \
@@ -90,7 +95,7 @@ HYDRA_FULL_ERROR=1 python -u -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node=$NUM_GPUS \
     trainer.nnodes=$NUM_NODES \
     trainer.save_freq=10 \
-    trainer.test_freq=4 \
+    trainer.test_freq=5 \
     trainer.total_epochs=100 \
     trainer.val_only=False \
     algorithm.adv_estimator=grpo \
@@ -98,6 +103,4 @@ HYDRA_FULL_ERROR=1 python -u -m verl.trainer.main_ppo \
     algorithm.adv_params.reward_model_gamma=1.0 \
     trainer.runtime_env=$ALIGN_PATH \
     trainer.wandb_mode=online \
-    trainer.val_before_train=False \
-
-
+    trainer.val_before_train=False
