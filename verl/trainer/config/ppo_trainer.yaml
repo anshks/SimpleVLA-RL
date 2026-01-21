@@ -100,7 +100,8 @@ actor_rollout_ref:
     center_crop: True
     max_prompt_length: 512
     num_images_in_input: 1
-    world_model_checkpoint: null  # Required for worldgym  
+    world_model_checkpoint: null  # Required for worldgym
+    reward_mode: sparse  # Options: "sparse" (default) or "dense" (for WorldGym ablation)
     name: vllm
     temperature: 1.0
     top_k: -1 # 0 for hf rollout, -1 for vllm rollout
@@ -172,6 +173,7 @@ verifier:
 #  timeout: 5
 #  num_processes: 64
   reward_coef: 5
+  reward_mode: sparse  # Options: "sparse" (default) or "dense" (for WorldGym ablation)
 
 reward_model:
   enable: True

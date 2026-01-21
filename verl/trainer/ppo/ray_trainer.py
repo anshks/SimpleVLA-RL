@@ -404,12 +404,28 @@ class RayTrainer(object):
 
             for k, v in reward_metrics.items():
                 metric_dict['test_reward/' + k] = v
-                
+
             for k, v in format_metrics.items():
                 metric_dict['format_acc/' + k] = v
-                
+
             for k, v in reward_format_metrics.items():
                 metric_dict['acc_wformat/' + k] = v
+
+            # Log dense reward statistics if applicable
+            reward_mode_arr = test_batch.non_tensor_batch.get("reward_mode", None)
+            reward_mode = reward_mode_arr[0] if reward_mode_arr is not None and len(reward_mode_arr) > 0 else "sparse"
+            if reward_mode == "dense":
+                dense_rewards = test_batch.non_tensor_batch.get("dense_rewards", None)
+                if dense_rewards is not None and len(dense_rewards) > 0:
+                    # Compute average per-step reward across batch
+                    all_frame_rewards = [r for trajectory in dense_rewards for r in trajectory]
+                    avg_step_reward = sum(all_frame_rewards) / len(all_frame_rewards) if all_frame_rewards else 0.0
+                    metric_dict['dense_reward/avg_step_reward'] = avg_step_reward
+
+                    # Count partial credit usage (0.5 rewards)
+                    partial_count = sum(1 for r in all_frame_rewards if abs(r - 0.5) < 0.01)
+                    metric_dict['dense_reward/partial_credit_pct'] = partial_count / len(all_frame_rewards) if all_frame_rewards else 0.0
+
             reward_tensor_lst.append(reward_tensor)
             #data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
             #data_source_lst.append( [self.config.data.task_suite_name] * reward_tensor.shape[0])
@@ -570,7 +586,7 @@ class RayTrainer(object):
 
                         if "worldgym" in self.config.data.task_suite_name:
                             gen_batch = newbatch.select(batch_keys=['task_id', 'trial_id'],
-                                                        non_tensor_batch_keys={"task_suite_name", "trial_png", "instruction"},
+                                                        non_tensor_batch_keys={"task_suite_name", "trial_png", "instruction", "partial_criteria"},
                                                         meta_info_keys={})
                         elif "robotwin" in self.config.data.task_suite_name:
                             gen_batch = newbatch.select(batch_keys=['task_id', 'trial_id',"trial_seed"],

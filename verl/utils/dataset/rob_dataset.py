@@ -241,6 +241,7 @@ class WORLDGYM_Dataset(Dataset):
                         "trial_seed": torch.tensor(-1, dtype=torch.int64).unsqueeze(0),
                         "trial_png": trial["trial_png"],
                         "instruction": trial["instruction"],
+                        "partial_criteria": trial.get("partial_criteria", None),  # For dense reward ablation
                     }
                     dataframes.append(data)
 

@@ -801,6 +801,7 @@ class RobHFRollout(BaseRollout):
         # Get PNG paths and instructions from prompts
         trial_png_paths = np.repeat(prompts.non_tensor_batch['trial_png'], n_samples)
         instructions = np.repeat(prompts.non_tensor_batch['instruction'], n_samples)
+        partial_criteria_list = np.repeat(prompts.non_tensor_batch['partial_criteria'], n_samples)
 
         max_steps = self.max_steps[self.config.task_suite_name]
         batch_size = task_id.size(0)
@@ -909,8 +910,11 @@ class RobHFRollout(BaseRollout):
             step += self.config.action_chunks_len
 
         # Evaluate rollouts with GPT-4o to get rewards (PARALLELIZED)
-        def evaluate_single_rollout(i, all_frames_list, instructions_list, task_id_tensor, trial_id_tensor, max_steps):
-            """Helper function to evaluate a single rollout."""
+        # Get reward mode from config
+        reward_mode = self.config.get('reward_mode', 'sparse')
+
+        def evaluate_single_rollout(i, all_frames_list, instructions_list, partial_criteria_list, task_id_tensor, trial_id_tensor, max_steps, reward_mode):
+            """Helper function to evaluate a single rollout with support for dense rewards."""
             try:
                 # Stack frames into video: (T, H, W, C) in uint8 format
                 video_frames = np.stack(all_frames_list[i], axis=0)
@@ -919,20 +923,50 @@ class RobHFRollout(BaseRollout):
                 # Prepare trial dict for GPT evaluation
                 trial_dict = {
                     "instruction": instructions_list[i],
-                    "partial_criteria": None
+                    "partial_criteria": partial_criteria_list[i]
                 }
 
-                # Get GPT reward (0.0 or 1.0)
-                reward_score = predict(video_uint8, trial_dict, n=5)
+                # Check reward mode
+                if reward_mode == 'dense':
+                    # Dense mode: evaluate each frame independently using parallel API calls
+                    num_frames = len(video_uint8)
 
-                # Record task completion
-                return {
-                    "active": False,
-                    "complete": reward_score >= 1.0,
-                    "finish_step": max_steps,
-                    "task_file_name": f"task_{task_id_tensor[i].item()}_trial_{trial_id_tensor[i].item()}",
-                    "index": i
-                }
+                    def evaluate_single_frame(frame_idx):
+                        """Evaluate a single frame with GPT."""
+                        single_frame_video = video_uint8[frame_idx:frame_idx+1]  # Shape: (1, H, W, C)
+                        return predict(single_frame_video, trial_dict, n=5)
+
+                    # Parallelize frame evaluations within this rollout (all frames in parallel)
+                    with ThreadPoolExecutor(max_workers=num_frames) as frame_executor:
+                        frame_futures = [frame_executor.submit(evaluate_single_frame, idx) for idx in range(num_frames)]
+                        per_frame_rewards = [f.result() for f in frame_futures]
+
+                    # Determine overall completion (1.0 if any frame achieves 1.0)
+                    max_reward = max(per_frame_rewards)
+                    complete = (max_reward >= 1.0)
+
+                    return {
+                        "active": False,
+                        "complete": complete,
+                        "finish_step": max_steps,
+                        "task_file_name": f"task_{task_id_tensor[i].item()}_trial_{trial_id_tensor[i].item()}",
+                        "index": i,
+                        "per_frame_rewards": per_frame_rewards,  # Dense rewards
+                        "reward_mode": "dense"
+                    }
+                else:
+                    # Sparse mode (current behavior): evaluate full video once
+                    reward_score = predict(video_uint8, trial_dict, n=5)
+
+                    return {
+                        "active": False,
+                        "complete": reward_score >= 1.0,
+                        "finish_step": max_steps,
+                        "task_file_name": f"task_{task_id_tensor[i].item()}_trial_{trial_id_tensor[i].item()}",
+                        "index": i,
+                        "final_reward": reward_score,  # Sparse reward
+                        "reward_mode": "sparse"
+                    }
             except Exception as e:
                 print(f"Error evaluating rollout {i}: {e}", flush=True)
                 return {
@@ -940,7 +974,8 @@ class RobHFRollout(BaseRollout):
                     "complete": False,
                     "finish_step": max_steps,
                     "task_file_name": f"task_{task_id_tensor[i].item()}_trial_{trial_id_tensor[i].item()}",
-                    "index": i
+                    "index": i,
+                    "reward_mode": reward_mode
                 }
 
         # Parallel evaluation using thread pool - parallelize entire batch
@@ -949,7 +984,7 @@ class RobHFRollout(BaseRollout):
             futures = {
                 executor.submit(
                     evaluate_single_rollout,
-                    i, all_frames, instructions, task_id, trial_id, max_steps
+                    i, all_frames, instructions, partial_criteria_list, task_id, trial_id, max_steps, reward_mode
                 ): i
                 for i in range(batch_size)
             }
@@ -1122,9 +1157,21 @@ class RobHFRollout(BaseRollout):
         
         batch["complete"] = torch.tensor([bool(k["complete"]) for k in task_records], dtype=torch.bool, device=batch['responses'].device)
         batch["finish_step"] = torch.tensor([k["finish_step"] for k in task_records], dtype=torch.int64, device=batch['responses'].device)
-        
+
+        # Handle dense rewards if present
+        reward_mode = task_records[0].get("reward_mode", "sparse")
+        non_tensor_batch = {}
+        if reward_mode == "dense":
+            # Extract per-frame rewards from task records
+            dense_rewards = [record.get("per_frame_rewards", []) for record in task_records]
+            # Convert to numpy array with dtype=object (required by DataProto)
+            non_tensor_batch["dense_rewards"] = np.array(dense_rewards, dtype=object)
+            non_tensor_batch["reward_mode"] = np.array(["dense"] * batch_size, dtype=object)
+        else:
+            non_tensor_batch["reward_mode"] = np.array(["sparse"] * batch_size, dtype=object)
+
         output_batch = TensorDict(batch, batch_size=batch_size)
-        return DataProto(batch=output_batch)
+        return DataProto(batch=output_batch, non_tensor_batch=non_tensor_batch)
     
     @torch.no_grad()
     def _generate_one_step(self, prompts: dict):

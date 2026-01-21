@@ -56,7 +56,7 @@ class RobRewardManager():
         return score, reward_metrics, format_metrics, reward_format_metrics
 
     def __call__(self, data: DataProto):
-        
+
         # aggregate all available reward tensors
 
         reward_tensor_dict={}
@@ -65,9 +65,10 @@ class RobRewardManager():
         verifier_reward=torch.zeros_like(data.batch['responses'], dtype=torch.float32)
         reward_tensor = reward_tensor.reshape((reward_tensor.shape[0],-1))
         verifier_reward = verifier_reward.reshape((verifier_reward.shape[0],-1))
-        
-        valid_response_length = data.batch['finish_step'] * self.config.actor_rollout_ref.model.action_token_len 
-       
+
+        valid_response_length = data.batch['finish_step'] * self.config.actor_rollout_ref.model.action_token_len
+        action_token_len = self.config.actor_rollout_ref.model.action_token_len
+
         if 'acc' in data.batch:
             # the separated rewards have been logged; now we add format correctness back for reward shaping
             #verifier_score = data.batch['acc'].cpu().numpy().tolist() + (0.0 * data.batch['format_correctness'].cpu().numpy()).tolist()
@@ -75,9 +76,27 @@ class RobRewardManager():
         else:
             verifier_score, verifier_metrics, format_metrics, reward_format_metrics = self.verify(data)
             reward_metrics.update(verifier_metrics)
-        for i in range(verifier_reward.shape[0]):
-            verifier_reward[i,valid_response_length[i]-1] += verifier_score[i]
-            
+
+        # Check reward mode from non_tensor_batch
+        reward_mode_arr = data.non_tensor_batch.get("reward_mode", None)
+        reward_mode = reward_mode_arr[0] if reward_mode_arr is not None else "sparse"
+
+        if reward_mode == "dense":
+            # Dense mode: assign per-step rewards
+            dense_rewards = data.non_tensor_batch["dense_rewards"]  # List of lists: (batch, num_frames)
+
+            for i in range(verifier_reward.shape[0]):
+                num_frames = len(dense_rewards[i])
+                for frame_idx in range(num_frames):
+                    # Assign reward to the last token of this frame's action chunk
+                    token_idx = (frame_idx + 1) * action_token_len - 1
+                    if token_idx < verifier_reward.shape[1]:
+                        verifier_reward[i, token_idx] = dense_rewards[i][frame_idx]
+        else:
+            # Sparse mode (current behavior): reward only at final step
+            for i in range(verifier_reward.shape[0]):
+                verifier_reward[i,valid_response_length[i]-1] += verifier_score[i]
+
         reward_tensor_dict['gt_scores'] = verifier_reward
 
         # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
