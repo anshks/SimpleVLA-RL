@@ -292,7 +292,7 @@ class RayTrainer(object):
     def _create_dataloader(self):   # next fix
         from torch.utils.data import DataLoader
         # TODO: we have to make sure the batch size is divisible by the dp size
-        from verl.utils.dataset.rob_dataset import LIBERO_Dataset, WORLDGYM_Dataset, Robotwin_Dataset, collate_fn, TaskBatchSampler
+        from verl.utils.dataset.rob_dataset import LIBERO_Dataset, WORLDGYM_Dataset, Robotwin_Dataset, Simpler_Dataset, collate_fn, TaskBatchSampler
         if "worldgym" in self.config.data.task_suite_name:
             self.train_dataset = WORLDGYM_Dataset(self.config.data.task_suite_name,
                                                 data_dir=self.config.data.data_dir + "/train",
@@ -315,11 +315,18 @@ class RayTrainer(object):
                                                   num_trials_per_task=self.config.data.num_trials_per_task,train_val ="train")
             self.val_dataset = Robotwin_Dataset(self.config.data.task_suite_name,
                                                 num_trials_per_task=self.config.data.num_trials_per_task,train_val ="valid")
+        elif "simpler" in self.config.data.task_suite_name:
+            self.train_dataset = Simpler_Dataset(self.config.data.task_suite_name,
+                                                 num_trials_per_task=self.config.data.num_trials_per_task,
+                                                 train_val="train")
+            self.val_dataset = Simpler_Dataset(self.config.data.task_suite_name,
+                                               num_trials_per_task=self.config.data.num_trials_per_task,
+                                               train_val="valid")
         else:
             raise ValueError(f'Unsupported task suite name: {self.config.data.task_suite_name}')
 
-        # Use TaskBatchSampler for WorldGym to ensure batches have the same instruction
-        if "worldgym" in self.config.data.task_suite_name:
+        # Use TaskBatchSampler for WorldGym and Simpler to ensure batches have the same instruction
+        if "worldgym" in self.config.data.task_suite_name or "simpler" in self.config.data.task_suite_name:
             train_batch_sampler = TaskBatchSampler(
                 self.train_dataset,
                 batch_size=int(self.config.data.train_batch_size*self.config.data.oversample_factor),
@@ -587,6 +594,10 @@ class RayTrainer(object):
                         if "worldgym" in self.config.data.task_suite_name:
                             gen_batch = newbatch.select(batch_keys=['task_id', 'trial_id'],
                                                         non_tensor_batch_keys={"task_suite_name", "trial_png", "instruction", "partial_criteria"},
+                                                        meta_info_keys={})
+                        elif "simpler" in self.config.data.task_suite_name:
+                            gen_batch = newbatch.select(batch_keys=['task_id', 'trial_id', 'trial_seed'],
+                                                        non_tensor_batch_keys={"task_suite_name", "simpler_task"},
                                                         meta_info_keys={})
                         elif "robotwin" in self.config.data.task_suite_name:
                             gen_batch = newbatch.select(batch_keys=['task_id', 'trial_id',"trial_seed"],

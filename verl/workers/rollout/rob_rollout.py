@@ -66,6 +66,13 @@ from codetiming import Timer
 import multiprocessing
 from multiprocessing import Process, Queue
 
+# For Simpler environment
+try:
+    from verl.utils.envs.simpler_env_wrapper import SimplerEnvWrapper
+except ImportError as e:
+    print(f"Warning: can't import SimplerEnvWrapper: {e}")
+    SimplerEnvWrapper = None
+
 __all__ = ['RobHFRollout']
 
 # Environment initialization lock for Robotwin
@@ -457,6 +464,15 @@ class RobHFRollout(BaseRollout):
             "robotwin2_place_shoe": 250,
             "robotwin2_move_pillbottle_pad": 200,
             "worldgym_bridge": 40,  # WorldGym Bridge dataset
+            # Simpler WidowX tasks
+            "simpler_widowx_spoon_on_towel": 40,
+            "simpler_widowx_carrot_on_plate": 40,
+            "simpler_widowx_stack_cube": 40,
+            "simpler_widowx_put_eggplant_in_basket": 40,
+            "simpler_widowx_put_eggplant_in_sink": 40,
+            "simpler_widowx_open_drawer": 40,
+            "simpler_widowx_close_drawer": 40,
+            "simpler_widowx_all": 40,
         }
         self.processor = AutoProcessor.from_pretrained(config.pretrained_checkpoint, trust_remote_code=True)
         self.vla_preprocess()
@@ -612,6 +628,8 @@ class RobHFRollout(BaseRollout):
         """Generate minibatch - routes to appropriate implementation based on task suite"""
         if "worldgym" in self.config.task_suite_name:
             return self._generate_minibatch_worldgym(prompts)
+        elif "simpler" in self.config.task_suite_name:
+            return self._generate_minibatch_simpler(prompts)
         elif "robotwin" in self.config.task_suite_name:
             return self._generate_minibatch_robotwin(prompts)
         else:
@@ -782,6 +800,153 @@ class RobHFRollout(BaseRollout):
         
         self.module.train()
         
+        # Prepare output batch
+        return self._prepare_output_batch(vla_history, task_records, batch_size)
+
+    def _generate_minibatch_simpler(self, prompts):
+        """Generate minibatch for Simpler environments."""
+        self.module.eval()
+        meta_info = prompts.meta_info
+        n_samples = meta_info.get('n_samples', 1)
+        task_id = prompts.batch['task_id'].repeat_interleave(n_samples, dim=0)
+        trial_id = prompts.batch['trial_id'].repeat_interleave(n_samples, dim=0)
+        trial_seed = prompts.batch['trial_seed'].repeat_interleave(n_samples, dim=0)
+        task_suite_name = np.repeat(prompts.non_tensor_batch['task_suite_name'], n_samples)
+        simpler_tasks = np.repeat(prompts.non_tensor_batch['simpler_task'], n_samples)
+        max_steps = self.max_steps.get(self.config.task_suite_name, 40)
+        batch_size = task_id.size(0)
+        is_valid = meta_info.get('n_samples') is None
+        global_steps = meta_info.get('global_steps', 0) if is_valid else 0
+
+        # Create environment wrappers
+        env_wrappers = []
+        for idx in range(batch_size):
+            task_name = simpler_tasks[idx]
+            tr_id = trial_id[idx][0].item()
+            tr_seed = trial_seed[idx][0].item()
+
+            wrapper = SimplerEnvWrapper(
+                task_name=task_name,
+                trial_id=tr_id,
+                trial_seed=tr_seed,
+                config=self.config
+            )
+            env_wrappers.append(wrapper)
+
+        # Initialize environments sequentially (SAPIEN renderer is not thread-safe)
+        for wrapper in env_wrappers:
+            try:
+                wrapper.initialize()
+            except Exception as e:
+                print(f"Simpler environment initialization failed: {e}", flush=True)
+                traceback.print_exc()
+                raise
+
+        # Collect initial observations
+        inputs = []
+        task_descriptions = []
+        task_records = []
+        valid_video = defaultdict(list)
+
+        for idx, wrapper in enumerate(env_wrappers):
+            try:
+                obs = wrapper.get_obs()
+                task_description = wrapper.get_instruction()
+                task_descriptions.append(task_description)
+                inputs.append(obs)
+
+                task_file_name = f"{wrapper.task_name}_trial_{wrapper.trial_id}_seed_{wrapper.trial_seed}"
+                task_records.append({
+                    "active": wrapper.active,
+                    "complete": wrapper.complete,
+                    "finish_step": wrapper.finish_step,
+                    "task_file_name": task_file_name
+                })
+
+                if is_valid:
+                    valid_video[task_file_name].append(obs['full_image'])
+
+            except Exception as e:
+                print(f"Failed to get initial Simpler observation: {e}", flush=True)
+                traceback.print_exc()
+                raise
+
+        # Main rollout loop
+        step = 0
+        vla_history = []
+
+        while step < max_steps:
+            active_indices = [i for i, r in enumerate(task_records) if r['active']]
+
+            current_inputs = inputs
+            current_task_descriptions = task_descriptions
+
+            # Get VLA actions
+            vla_input = self.process_input(current_inputs, current_task_descriptions)
+            vla_input.update(meta_info)
+
+            vla_output = self._generate_one_step(vla_input)
+            actions = vla_output["action"]
+
+            step_data = {
+                "responses": vla_output["responses"],
+                "input_ids": vla_output["input_ids"],
+                "attention_mask": vla_output["attention_mask"],
+                "pixel_values": vla_output["pixel_values"],
+                "action": actions,
+                "step": step
+            }
+
+            vla_history.append(step_data)
+
+            # Execute actions sequentially (SAPIEN physics/IK solver is not thread-safe)
+            new_inputs = inputs.copy()
+            for idx in active_indices:
+                try:
+                    obs, done = env_wrappers[idx].step(actions[idx])
+                    if obs is not None:
+                        new_inputs[idx] = obs
+
+                    task_records[idx]['active'] = env_wrappers[idx].active
+                    task_records[idx]['complete'] = env_wrappers[idx].complete
+                    task_records[idx]['finish_step'] = env_wrappers[idx].finish_step
+
+                    if is_valid and obs is not None:
+                        valid_video[task_records[idx]['task_file_name']].append(obs['full_image'])
+
+                except Exception as e:
+                    print(f"Simpler step execution failed: {e}", flush=True)
+                    task_records[idx]['active'] = False
+                    task_records[idx]['complete'] = False
+                    task_records[idx]['finish_step'] = step + self.config.action_chunks_len
+
+            inputs = new_inputs
+            step += self.config.action_chunks_len
+
+        # Clean up environments sequentially (SAPIEN is not thread-safe)
+        for wrapper in env_wrappers:
+            try:
+                wrapper.close()
+            except Exception as e:
+                print(f"Simpler environment cleanup failed: {e}", flush=True)
+
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        # Save validation videos
+        if is_valid:
+            for task_file, images in valid_video.items():
+                complete = any(r['complete'] for r in task_records if r['task_file_name'] == task_file)
+                save_rollout_video(
+                    images,
+                    self.config.experiment_name,
+                    task_file,
+                    global_steps,
+                    complete
+                )
+
+        self.module.train()
+
         # Prepare output batch
         return self._prepare_output_batch(vla_history, task_records, batch_size)
 

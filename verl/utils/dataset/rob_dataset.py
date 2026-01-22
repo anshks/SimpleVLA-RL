@@ -378,6 +378,75 @@ class Robotwin_Dataset(Dataset):
         return self.dataframe[item]
 
 
+class Simpler_Dataset(Dataset):
+    """Dataset for Simpler environments (WidowX/Bridge tasks)."""
+
+    WIDOWX_TASKS = [
+        "widowx_spoon_on_towel",
+        "widowx_carrot_on_plate",
+        "widowx_stack_cube",
+        "widowx_put_eggplant_in_basket",
+        "widowx_put_eggplant_in_sink",
+        "widowx_open_drawer",
+        "widowx_close_drawer",
+    ]
+
+    def __init__(self, task_name, num_trials_per_task=50, train_val="train"):
+        """Initialize the dataset.
+
+        Args:
+            task_name: Task name like 'simpler_widowx_spoon_on_towel' or 'simpler_widowx_all'
+            num_trials_per_task: Number of episodes per task
+            train_val: 'train' or 'valid'
+        """
+        self.task_name = task_name
+        self.num_trials_per_task = num_trials_per_task
+        self.train_val = train_val
+        self.task_list = self._get_task_list(task_name)
+        self._read_files_and_tokenize()
+
+    def _get_task_list(self, task_name):
+        """Get list of tasks to include."""
+        clean = task_name.removeprefix("simpler_")
+        if clean == "widowx_all":
+            return self.WIDOWX_TASKS
+        elif clean in self.WIDOWX_TASKS:
+            return [clean]
+        else:
+            raise ValueError(f"Unknown Simpler task: {task_name}. Available: {self.WIDOWX_TASKS}")
+
+    def _read_files_and_tokenize(self):
+        """Build dataframe of all episodes."""
+        dataframes = []
+        base_seed = 100000 if self.train_val == "train" else 200000
+
+        if self.train_val == "valid":
+            num_trials = min(128, self.num_trials_per_task)
+        else:
+            num_trials = self.num_trials_per_task
+
+        for task_idx, task in enumerate(self.task_list):
+            for trial_id in range(num_trials):
+                trial_seed = base_seed + task_idx * 10000 + trial_id
+                dataframes.append({
+                    "task_suite_name": self.task_name,
+                    "simpler_task": task,
+                    "task_id": torch.tensor(task_idx, dtype=torch.int64).unsqueeze(0),
+                    "trial_id": torch.tensor(trial_id, dtype=torch.int64).unsqueeze(0),
+                    "trial_seed": torch.tensor(trial_seed, dtype=torch.int64).unsqueeze(0),
+                })
+
+        self.dataframe = dataframes
+        print(f'Simpler dataset len: {len(self.dataframe)}')
+        print(f'Tasks: {self.task_list}')
+
+    def __len__(self):
+        return len(self.dataframe)
+
+    def __getitem__(self, item):
+        return self.dataframe[item]
+
+
 class BufferedDataLoader:
     def __init__(self, dataloader):
         self.dataloader = dataloader
