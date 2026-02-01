@@ -568,6 +568,7 @@ class RobActorRolloutRefWorker(Worker):
     def save_checkpoint(self, local_path, hdfs_path=None):
         assert self._is_actor
         
+        import torch
         import torch.distributed as dist
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
         from peft import PeftModel

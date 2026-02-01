@@ -847,6 +847,7 @@ class RobHFRollout(BaseRollout):
         task_descriptions = []
         task_records = []
         valid_video = defaultdict(list)
+        all_dense_rewards = [[] for _ in range(batch_size)]
 
         for idx, wrapper in enumerate(env_wrappers):
             try:
@@ -856,13 +857,7 @@ class RobHFRollout(BaseRollout):
                 inputs.append(obs)
 
                 task_file_name = f"{wrapper.task_name}_trial_{wrapper.trial_id}_seed_{wrapper.trial_seed}"
-                task_records.append({
-                    "active": wrapper.active,
-                    "complete": wrapper.complete,
-                    "finish_step": wrapper.finish_step,
-                    "task_file_name": task_file_name
-                })
-
+                task_records.append({"task_file_name": task_file_name})
                 if is_valid:
                     valid_video[task_file_name].append(obs['full_image'])
 
@@ -876,54 +871,48 @@ class RobHFRollout(BaseRollout):
         vla_history = []
 
         while step < max_steps:
-            active_indices = [i for i, r in enumerate(task_records) if r['active']]
-
-            current_inputs = inputs
-            current_task_descriptions = task_descriptions
 
             # Get VLA actions
-            vla_input = self.process_input(current_inputs, current_task_descriptions)
+            vla_input = self.process_input(inputs, task_descriptions)
             vla_input.update(meta_info)
 
             vla_output = self._generate_one_step(vla_input)
             actions = vla_output["action"]
 
-            step_data = {
+            vla_history.append({
                 "responses": vla_output["responses"],
                 "input_ids": vla_output["input_ids"],
                 "attention_mask": vla_output["attention_mask"],
                 "pixel_values": vla_output["pixel_values"],
                 "action": actions,
                 "step": step
-            }
-
-            vla_history.append(step_data)
+            })
 
             # Execute actions sequentially (SAPIEN physics/IK solver is not thread-safe)
             new_inputs = inputs.copy()
-            for idx in active_indices:
+            for idx, wrapper in enumerate(env_wrappers):
                 try:
-                    obs, done = env_wrappers[idx].step(actions[idx])
+                    act = actions[idx]
+                    act_np = act.detach().cpu().numpy() if hasattr(act, "detach") else np.asarray(act)
+                    obs, _, step_frames, step_rewards = wrapper.step(act_np)
                     if obs is not None:
                         new_inputs[idx] = obs
-
-                    task_records[idx]['active'] = env_wrappers[idx].active
-                    task_records[idx]['complete'] = env_wrappers[idx].complete
-                    task_records[idx]['finish_step'] = env_wrappers[idx].finish_step
-
-                    if is_valid and obs is not None:
-                        valid_video[task_records[idx]['task_file_name']].append(obs['full_image'])
-
+                    if is_valid:
+                        valid_video[task_records[idx]['task_file_name']].extend(step_frames)
+                    all_dense_rewards[idx].extend(step_rewards)
                 except Exception as e:
                     print(f"Simpler step execution failed: {e}", flush=True)
-                    task_records[idx]['active'] = False
-                    task_records[idx]['complete'] = False
-                    task_records[idx]['finish_step'] = step + self.config.action_chunks_len
 
             inputs = new_inputs
             step += self.config.action_chunks_len
 
-        # Clean up environments sequentially (SAPIEN is not thread-safe)
+        # Finalize: use sum of dense rewards as reward, wrapper.success for video naming
+        for idx in range(batch_size):
+            task_records[idx]['finish_step'] = max_steps
+            task_records[idx]['complete'] = sum(all_dense_rewards[idx]) if all_dense_rewards[idx] else 0.0
+            task_records[idx]['success'] = env_wrappers[idx].success
+
+        # Clean up environments
         for wrapper in env_wrappers:
             try:
                 wrapper.close()
@@ -933,17 +922,11 @@ class RobHFRollout(BaseRollout):
         torch.cuda.empty_cache()
         gc.collect()
 
-        # Save validation videos
+        # Save validation videos (only during validation)
         if is_valid:
             for task_file, images in valid_video.items():
-                complete = any(r['complete'] for r in task_records if r['task_file_name'] == task_file)
-                save_rollout_video(
-                    images,
-                    self.config.experiment_name,
-                    task_file,
-                    global_steps,
-                    complete
-                )
+                is_success = any(r.get('success', False) for r in task_records if r['task_file_name'] == task_file)
+                save_rollout_video(images, self.config.experiment_name, task_file, global_steps, is_success)
 
         self.module.train()
 
@@ -1320,7 +1303,8 @@ class RobHFRollout(BaseRollout):
         for k, v in batch.items():
             batch[k] = torch.stack(v, dim=1)
         
-        batch["complete"] = torch.tensor([bool(k["complete"]) for k in task_records], dtype=torch.bool, device=batch['responses'].device)
+        # For simpler, complete stores the sum of rewards (float). For others, it's a boolean.
+        batch["complete"] = torch.tensor([float(k["complete"]) for k in task_records], dtype=torch.float32, device=batch['responses'].device)
         batch["finish_step"] = torch.tensor([k["finish_step"] for k in task_records], dtype=torch.int64, device=batch['responses'].device)
 
         # Handle dense rewards if present

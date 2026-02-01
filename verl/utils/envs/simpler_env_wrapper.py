@@ -2,6 +2,7 @@
 Simpler environment wrapper for SimpleVLA-RL.
 
 Wrapper for Simpler environments (ManiSkill2-based simulation) supporting WidowX (Bridge) robot.
+Consistent with auto_eval policies - only uses image, no proprio.
 """
 
 import numpy as np
@@ -17,20 +18,15 @@ except ImportError as e:
 
 try:
     from transforms3d import euler as te
-    from transforms3d import quaternions as tq
 except ImportError as e:
     print(f"Warning: can't import transforms3d: {e}")
     te = None
-    tq = None
 
 __all__ = ['SimplerEnvWrapper']
 
 
 class SimplerEnvWrapper:
     """Wrapper for Simpler environment with WidowX (Bridge) robot."""
-
-    # Coordinate transform for WidowX (Bridge frame)
-    DEFAULT_ROT = np.array([[0, 0, 1.0], [0, 1.0, 0], [-1.0, 0, 0]])
 
     def __init__(self, task_name, trial_id, trial_seed, config):
         """Initialize the wrapper.
@@ -46,12 +42,11 @@ class SimplerEnvWrapper:
         self.trial_seed = trial_seed
         self.config = config
         self.env = None
-        self.active = True
-        self.complete = False
-        self.finish_step = 0
+        self.success = False
         self.instruction = None
         self.obs = None
         self.image_size = (256, 256)
+        self.finish_step = 0
 
     def initialize(self):
         """Initialize the Simpler environment."""
@@ -67,52 +62,103 @@ class SimplerEnvWrapper:
         np.random.seed(self.trial_seed)
         self.obs, _ = self.env.reset()
         self.instruction = self.env.unwrapped.get_language_instruction()
+        self.success = False
 
     def get_obs(self):
         """Get processed observation."""
         return self._process_obs(self.obs)
 
     def _process_obs(self, obs):
-        """Convert ManiSkill2 obs to VLA input format."""
+        """Convert ManiSkill2 obs to VLA input format (image only, no proprio)."""
         img = get_image_from_maniskill2_obs_dict(self.env, obs, camera_name=None)
         img = cv2.resize(img, self.image_size)
-
-        eef_pose = obs['agent']['eef_pos']
-        proprio = self._process_widowx_proprio(eef_pose)
-
-        return {
-            'full_image': img,
-            'state': proprio.astype(np.float32)
-        }
-
-    def _process_widowx_proprio(self, proprio):
-        """Process WidowX proprio: quat->euler with coordinate frame transform."""
-        rm_bridge = tq.quat2mat(proprio[3:7])
-        rpy_bridge_converted = te.mat2euler(rm_bridge @ self.DEFAULT_ROT.T)
-        return np.concatenate([proprio[:3], rpy_bridge_converted, [proprio[7]]])
+        return {'full_image': img}
 
     def step(self, action):
-        """Execute action with gripper binarization."""
+        """Execute a chunk of actions, returning the final obs plus per-step frames and rewards.
+
+        Returns:
+            last_processed: Final observation dict
+            success: Whether task succeeded
+            per_step_frames: List of images for each step
+            per_step_rewards: List of dense rewards for each step
+        """
         if len(action.shape) == 1:
             action = action[np.newaxis, :]
 
-        for i in range(action.shape[0]):
-            if not self.active:
-                break
+        per_step_frames = []
+        per_step_rewards = []
+        last_processed = None
 
+        for i in range(action.shape[0]):
             a = action[i].copy()
-            # Binarize gripper for WidowX
+            # Convert RPY -> axis-angle to match ManiSkill/SimplerEnv convention
+            # Using euler2axangle directly as in SimplerEnv's octo_model.py
+            if te is not None:
+                try:
+                    roll, pitch, yaw = a[3], a[4], a[5]
+                    action_rotation_ax, action_rotation_angle = te.euler2axangle(roll, pitch, yaw)
+                    a[3:6] = action_rotation_ax * action_rotation_angle
+                except Exception as e:
+                    print(f"Warning: RPY to axis-angle conversion failed: {e}", flush=True)
+            # Binarize gripper for WidowX (threshold 0.5 to match Bridge convention)
             a[-1] = 2.0 * (a[-1] > 0.5) - 1.0
 
             self.obs, reward, done, truncated, info = self.env.step(a)
             self.finish_step += 1
+            self.success = self.success or bool(info.get("success", False))
+
+            # Compute dense reward from info
+            step_reward = self._compute_dense_reward(info)
+            per_step_rewards.append(step_reward)
+
+            processed = self._process_obs(self.obs)
+            per_step_frames.append(processed["full_image"])
+            last_processed = processed
 
             if done or truncated:
-                self.active = False
-                self.complete = done
                 break
 
-        return self._process_obs(self.obs), self.complete
+        if last_processed is None and self.obs is not None:
+            last_processed = self._process_obs(self.obs)
+
+        return last_processed, self.success, per_step_frames, per_step_rewards
+
+    def _compute_dense_reward(self, info):
+        """Compute dense reward from environment info.
+
+        Available info fields (task-dependent):
+        - is_grasped / is_src_obj_grasped: object currently grasped
+        - consecutive_grasp: grasped for 5+ consecutive steps
+        - lifted_object: object is lifted
+        - lifted_object_significantly: object lifted significantly
+        - success: task completed
+
+        Returns:
+            float: Dense reward for this step
+        """
+        reward = 0.0
+
+        # Reward for grasping the object
+        is_grasped = info.get("is_src_obj_grasped", info.get("is_grasped", False))
+        if is_grasped:
+            reward += 0.1
+
+        # Reward for consecutive grasp (stable grasp)
+        if info.get("consecutive_grasp", False):
+            reward += 0.1
+
+        # Reward for lifting the object (intermediate sparse signal before success)
+        if info.get("lifted_object_significantly", False):
+            reward += 0.1
+        elif info.get("lifted_object", False):
+            reward += 0.1
+
+        # Reward for task success
+        if info.get("success", False):
+            reward += 1.0
+
+        return reward
 
     def get_instruction(self):
         """Get the task instruction string."""
